@@ -1,0 +1,106 @@
+name: Peer Review Agent
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr diff ${{ github.event.pull_request.number }} > pr-diff.txt
+
+      - name: Run tests
+        run: |
+          pip install pytest
+          pytest -v > test-result.txt 2>&1 || true
+          cat test-result.txt
+
+      - name: Gemini Peer Review
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python - <<'PY'
+          import os, urllib.request, json
+
+          with open("pr-diff.txt") as f:
+              diff = f.read()
+
+          with open("test-result.txt") as f:
+              tests = f.read()
+
+          prompt = f"""
+          You are the Peer Review Agent.
+
+          Review this pull request.
+
+          CODE CHANGES:
+          {diff}
+
+          TEST RESULTS:
+          {tests}
+
+          Determine:
+
+          1. Does the change fix the original bug?
+          2. Are tests passing?
+          3. Could this introduce a regression?
+          4. Is the implementation reasonable?
+
+          Finish with exactly one of:
+
+          APPROVE
+
+          or
+
+          REQUEST CHANGES
+
+          Then explain your decision.
+          """
+
+          data = {
+              "contents": [{
+                  "parts": [{"text": prompt}]
+              }]
+          }
+
+          req = urllib.request.Request(
+              "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent",
+              data=json.dumps(data).encode(),
+              headers={
+                  "Content-Type": "application/json",
+                  "x-goog-api-key": os.environ["GEMINI_API_KEY"]
+              }
+          )
+
+          response = urllib.request.urlopen(req)
+          result = json.loads(response.read())
+
+          review = result["candidates"][0]["content"]["parts"][0]["text"]
+
+          print(review)
+
+          with open("review.txt", "w") as f:
+              f.write(review)
+          PY
+
+      - name: Post review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --body "$(cat review.txt)"
