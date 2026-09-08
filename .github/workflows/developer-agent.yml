@@ -1,0 +1,94 @@
+name: Developer Agent
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  developer:
+    if: contains(github.event.issue.title, 'AI Testing Agent')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ask Gemini for fix
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ISSUE: ${{ github.event.issue.body }}
+        run: |
+          python - <<'PY'
+          import os, urllib.request, json
+
+          with open("calculator.py") as f:
+              code = f.read()
+
+          prompt = f"""
+          You are the Developer Agent.
+
+          Fix the bug described below.
+
+          BUG REPORT:
+          {os.environ['ISSUE']}
+
+          CURRENT CODE:
+          {code}
+
+          Return ONLY the complete corrected contents of calculator.py.
+          Do not use markdown fences.
+          Do not modify the tests.
+          """
+
+          data = {
+              "contents": [{
+                  "parts": [{"text": prompt}]
+              }]
+          }
+
+          req = urllib.request.Request(
+              "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent",
+              data=json.dumps(data).encode(),
+              headers={
+                  "Content-Type": "application/json",
+                  "x-goog-api-key": os.environ["GEMINI_API_KEY"]
+              }
+          )
+
+          response = urllib.request.urlopen(req)
+          result = json.loads(response.read())
+
+          answer = result["candidates"][0]["content"]["parts"][0]["text"]
+          answer = answer.replace("```python", "").replace("```", "").strip()
+
+          with open("calculator.py", "w") as f:
+              f.write(answer)
+          PY
+
+      - name: Test fix
+        run: |
+          pip install pytest
+          pytest -v
+
+      - name: Create Pull Request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "AI Developer Agent"
+          git config user.email "ai-agent@example.com"
+
+          git checkout -b ai-fix-${{ github.event.issue.number }}
+          git add calculator.py
+          git commit -m "AI Agent: Fix discount calculation"
+          git push origin HEAD
+
+          gh pr create \
+            --title "AI Developer Agent: Fix bug" \
+            --body "AI Developer Agent fixed the bug reported by the Testing Agent and verified the tests." \
+            --base main \
+            --head ai-fix-${{ github.event.issue.number }}
