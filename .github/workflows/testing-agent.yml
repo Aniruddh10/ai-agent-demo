@@ -1,0 +1,97 @@
+name: Testing Agent
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  test-agent:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run tests
+        id: tests
+        run: |
+          pip install pytest
+          pytest -v > test-result.txt 2>&1 || true
+          cat test-result.txt
+
+      - name: Ask Gemini to diagnose
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python - <<'PY'
+          import os, urllib.request, json
+
+          with open("calculator.py") as f:
+              code = f.read()
+
+          with open("test_calculator.py") as f:
+              tests = f.read()
+
+          with open("test-result.txt") as f:
+              result = f.read()
+
+          prompt = f"""
+          You are the Testing Agent.
+
+          Analyze this Python repository.
+
+          SOURCE CODE:
+          {code}
+
+          TESTS:
+          {tests}
+
+          TEST RESULT:
+          {result}
+
+          Identify the bug and explain:
+          1. What failed
+          2. Root cause
+          3. Expected behavior
+          4. Actual behavior
+          5. Suggested fix
+
+          Do not modify the code.
+          """
+
+          data = {
+              "contents": [{
+                  "parts": [{"text": prompt}]
+              }]
+          }
+
+          req = urllib.request.Request(
+              "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent",
+              data=json.dumps(data).encode(),
+              headers={
+                  "Content-Type": "application/json",
+                  "x-goog-api-key": os.environ["GEMINI_API_KEY"]
+              }
+          )
+
+          response = urllib.request.urlopen(req)
+          result = json.loads(response.read())
+
+          answer = result["candidates"][0]["content"]["parts"][0]["text"]
+
+          print(answer)
+
+          with open("bug-report.txt", "w") as f:
+              f.write(answer)
+          PY
+
+      - name: Create GitHub Issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --title "AI Testing Agent: Bug Detected" \
+            --body "$(cat bug-report.txt)"
